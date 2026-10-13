@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+apriltag = "0.4.0"
 image = "0.25.10"
 nokhwa = { version = "0.10.11", default-features = false, features = ["input-native"] }
 pollster = "1.0.1"

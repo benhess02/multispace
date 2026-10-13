@@ -37,6 +37,12 @@ fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
     )
     .unwrap();
 
+    let mut image = unsafe { apriltag::Image::new_uinit(1920, 1080) }.unwrap();
+    let mut detector = apriltag::Detector::builder()
+        .add_family_bits(apriltag::Family::tag_standard_52h13(), 1)
+        .build()
+        .unwrap();
+
     camera.open_stream().unwrap();
 
     loop {
@@ -47,9 +53,19 @@ fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
         let layout = buffer.sample_layout();
         let buffer_bytes = buffer.into_raw();
         let mut buffer_bytes_with_alpha = Vec::with_capacity(buffer_bytes.len() / 3 * 4);
+        let mut image_index: usize = 0;
         for pixel in buffer_bytes.chunks(3) {
             buffer_bytes_with_alpha.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+            image.as_slice_mut()[image_index] =
+                ((pixel[0] as u32 + pixel[1] as u32 + pixel[2] as u32) / 3) as u8;
+            image_index += 1;
         }
+
+        let detections = detector.detect(&image);
+        for detection in &detections {
+            println!("{}: {:?}", detection.id(), detection.corners());
+        }
+
         *camera_data.lock().unwrap() = Some(VisionState {
             width: layout.width,
             height: layout.height,
