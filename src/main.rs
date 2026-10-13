@@ -26,6 +26,7 @@ struct AppState {
     camera_texture: wgpu::Texture,
     render_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
+    aspect_buffer: wgpu::Buffer,
 }
 
 fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
@@ -129,6 +130,16 @@ impl AppState {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::all(),
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(4),
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -187,6 +198,13 @@ impl AppState {
 
         let texture_view = camera_texture.create_view(&wgpu::wgt::TextureViewDescriptor::default());
 
+        let aspect_buffer = device.create_buffer(&wgpu::wgt::BufferDescriptor {
+            label: None,
+            size: 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &bind_group_layout,
@@ -198,6 +216,14 @@ impl AppState {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &aspect_buffer,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(4),
+                    }),
                 },
             ],
         });
@@ -215,6 +241,7 @@ impl AppState {
             camera_sampler,
             render_pipeline,
             bind_group,
+            aspect_buffer,
         };
 
         state.configure_surface();
@@ -292,6 +319,16 @@ impl AppState {
             }
             _ => panic!(),
         };
+
+        let camera_aspect = 1920. / 1080.;
+
+        let window_aspect =
+            current_texture.texture.width() as f32 / current_texture.texture.height() as f32;
+
+        let aspect = window_aspect / camera_aspect;
+
+        self.queue
+            .write_buffer(&self.aspect_buffer, 0, bytemuck::bytes_of(&aspect));
 
         let texture_view = current_texture
             .texture
