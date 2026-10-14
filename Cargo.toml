@@ -6,8 +6,8 @@ edition = "2024"
 [dependencies]
 apriltag = "0.4.0"
 bytemuck = "1.25.2"
+cameras = "0.3.2"
 image = "0.25.10"
-nokhwa = { version = "0.10.11", default-features = false, features = ["input-native"] }
 pollster = "1.0.1"
 wgpu = "30.0.1"
 winit = "0.30.13"

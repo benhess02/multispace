@@ -1,16 +1,35 @@
 use std::{
     sync::{Arc, Mutex},
     thread,
+    time::Duration,
 };
 
 use winit::{
     application::ApplicationHandler, event::WindowEvent, event_loop::EventLoop, window::Window,
 };
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::NoUninit)]
+struct DisplayInfo {
+    aspect: f32,
+    tag_x: f32,
+    tag_y: f32,
+    tag_x2: f32,
+    tag_y2: f32,
+}
+
+struct TagInfo {
+    tag_x: f32,
+    tag_y: f32,
+    tag_x2: f32,
+    tag_y2: f32,
+}
+
 struct VisionState {
     width: u32,
     height: u32,
     buffer: Vec<u8>,
+    tag: Option<TagInfo>,
 }
 
 struct AppState {
@@ -26,17 +45,50 @@ struct AppState {
     camera_texture: wgpu::Texture,
     render_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
-    aspect_buffer: wgpu::Buffer,
+    display_info_buffer: wgpu::Buffer,
+    display_info: DisplayInfo,
 }
 
 fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
-    let mut camera = nokhwa::Camera::new(
-        nokhwa::utils::CameraIndex::Index(0),
-        nokhwa::utils::RequestedFormat::new::<nokhwa::pixel_format::RgbFormat>(
-            nokhwa::utils::RequestedFormatType::AbsoluteHighestFrameRate,
-        ),
+    let cameras = cameras::devices().unwrap();
+    for camera in &cameras {
+        println!("{:?}: {}", camera.id, camera.name);
+    }
+
+    let device = &cameras[0];
+    println!("Using camera: {}", device.name);
+
+    let caps = cameras::probe(device).unwrap();
+
+    let mut format_index = 0;
+    let mut max_resolution = 0;
+    let mut max_framerate = 0.;
+    for i in 0..caps.formats.len() {
+        let format = &caps.formats[i];
+        let resolution = format.resolution.width * format.resolution.height;
+        let framerate = format.framerate_range.max;
+        if framerate > max_framerate || (framerate == max_framerate && resolution > max_resolution)
+        {
+            format_index = i;
+            max_resolution = resolution;
+            max_framerate = framerate;
+        }
+    }
+
+    let selected_format = &caps.formats[format_index];
+    println!("Requesting camera format: {:?}", selected_format);
+
+    let camera = cameras::open(
+        device,
+        cameras::StreamConfig {
+            resolution: selected_format.resolution,
+            framerate: selected_format.framerate_range.max as u32,
+            pixel_format: selected_format.pixel_format,
+        },
     )
     .unwrap();
+
+    println!("Using camera format: {:?}", camera.config);
 
     let mut image = unsafe { apriltag::Image::new_uinit(1920, 1080) }.unwrap();
     let mut detector = apriltag::Detector::builder()
@@ -44,33 +96,34 @@ fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
         .build()
         .unwrap();
 
-    camera.open_stream().unwrap();
-
     loop {
-        let frame = camera.frame().unwrap();
-        let buffer = frame
-            .decode_image::<nokhwa::pixel_format::RgbFormat>()
-            .unwrap();
-        let layout = buffer.sample_layout();
-        let buffer_bytes = buffer.into_raw();
-        let mut buffer_bytes_with_alpha = Vec::with_capacity(buffer_bytes.len() / 3 * 4);
+        let frame = cameras::next_frame(&camera, Duration::from_secs(1)).unwrap();
+        let buffer_bytes = cameras::to_rgba8(&frame).unwrap();
         let mut image_index: usize = 0;
-        for pixel in buffer_bytes.chunks(3) {
-            buffer_bytes_with_alpha.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+        for pixel in buffer_bytes.chunks(4) {
             image.as_slice_mut()[image_index] =
                 ((pixel[0] as u32 + pixel[1] as u32 + pixel[2] as u32) / 3) as u8;
             image_index += 1;
         }
 
         let detections = detector.detect(&image);
-        for detection in &detections {
-            println!("{}: {:?}", detection.id(), detection.corners());
+        let mut tag = None;
+        if detections.len() > 0 {
+            let p1 = detections[0].corners()[0];
+            let p2 = detections[0].corners()[2];
+            tag = Some(TagInfo {
+                tag_x: p1[0] as f32 / frame.width as f32,
+                tag_y: p1[1] as f32 / frame.height as f32,
+                tag_x2: p2[0] as f32 / frame.width as f32,
+                tag_y2: p2[1] as f32 / frame.height as f32,
+            })
         }
 
         *camera_data.lock().unwrap() = Some(VisionState {
-            width: layout.width,
-            height: layout.height,
-            buffer: buffer_bytes_with_alpha,
+            width: frame.width,
+            height: frame.height,
+            buffer: buffer_bytes,
+            tag,
         });
     }
 }
@@ -136,7 +189,7 @@ impl AppState {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(4),
+                        min_binding_size: wgpu::BufferSize::new(size_of::<DisplayInfo>() as u64),
                     },
                     count: None,
                 },
@@ -198,9 +251,9 @@ impl AppState {
 
         let texture_view = camera_texture.create_view(&wgpu::wgt::TextureViewDescriptor::default());
 
-        let aspect_buffer = device.create_buffer(&wgpu::wgt::BufferDescriptor {
+        let display_info_buffer = device.create_buffer(&wgpu::wgt::BufferDescriptor {
             label: None,
-            size: 4,
+            size: size_of::<DisplayInfo>() as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
             mapped_at_creation: false,
         });
@@ -220,9 +273,9 @@ impl AppState {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &aspect_buffer,
+                        buffer: &display_info_buffer,
                         offset: 0,
-                        size: wgpu::BufferSize::new(4),
+                        size: wgpu::BufferSize::new(size_of::<DisplayInfo>() as u64),
                     }),
                 },
             ],
@@ -241,7 +294,14 @@ impl AppState {
             camera_sampler,
             render_pipeline,
             bind_group,
-            aspect_buffer,
+            display_info_buffer,
+            display_info: DisplayInfo {
+                aspect: 0.,
+                tag_x: 0.,
+                tag_y: 0.,
+                tag_x2: 0.,
+                tag_y2: 0.,
+            },
         };
 
         state.configure_surface();
@@ -261,8 +321,8 @@ impl AppState {
                 color_space: wgpu::SurfaceColorSpace::Auto,
                 width: self.size.width,
                 height: self.size.height,
-                present_mode: wgpu::PresentMode::AutoVsync,
-                desired_maximum_frame_latency: 2,
+                present_mode: wgpu::PresentMode::Immediate,
+                desired_maximum_frame_latency: 1,
                 alpha_mode: wgpu::CompositeAlphaMode::Auto,
                 view_formats: vec![self.surface_format],
             },
@@ -303,6 +363,12 @@ impl AppState {
 
         if let Some(state) = &camera_data {
             self.set_camera_texture(state);
+            if let Some(tag) = &state.tag {
+                self.display_info.tag_x = tag.tag_x;
+                self.display_info.tag_y = tag.tag_y;
+                self.display_info.tag_x2 = tag.tag_x2;
+                self.display_info.tag_y2 = tag.tag_y2;
+            }
         }
 
         let current_texture = match self.surface.get_current_texture() {
@@ -327,8 +393,13 @@ impl AppState {
 
         let aspect = window_aspect / camera_aspect;
 
-        self.queue
-            .write_buffer(&self.aspect_buffer, 0, bytemuck::bytes_of(&aspect));
+        self.display_info.aspect = aspect;
+
+        self.queue.write_buffer(
+            &self.display_info_buffer,
+            0,
+            bytemuck::bytes_of(&self.display_info),
+        );
 
         let texture_view = current_texture
             .texture
