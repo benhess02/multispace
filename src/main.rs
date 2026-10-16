@@ -1,3 +1,8 @@
+mod math;
+mod mesh;
+mod renderer;
+mod vertexBuffer;
+
 use std::{
     sync::{Arc, Mutex},
     thread,
@@ -8,45 +13,95 @@ use winit::{
     application::ApplicationHandler, event::WindowEvent, event_loop::EventLoop, window::Window,
 };
 
+use crate::{
+    math::{Vec2, Vec3},
+    mesh::MeshVertex,
+    renderer::Renderer,
+    vertexBuffer::{
+        GPUBindGroup, GPURenderProgram, GPUResource, GPUResourceGroup, GPUSampler, GPUTexture,
+        GPUUniformBuffer, VertexBuffer,
+    },
+};
+
+const COLOR: Vec3 = Vec3::new(1., 0.2, 0.2);
+
+const VERTICES: &[MeshVertex] = &[
+    MeshVertex {
+        position: Vec3::new(-1., -1., 0.),
+        color: COLOR,
+        uv: Vec2::new(0., 1.),
+    },
+    MeshVertex {
+        position: Vec3::new(1., -1., 0.),
+        color: COLOR,
+        uv: Vec2::new(1., 1.),
+    },
+    MeshVertex {
+        position: Vec3::new(1., 1., 0.),
+        color: COLOR,
+        uv: Vec2::new(1., 0.),
+    },
+    MeshVertex {
+        position: Vec3::new(1., 1., 0.),
+        color: COLOR,
+        uv: Vec2::new(1., 0.),
+    },
+    MeshVertex {
+        position: Vec3::new(-1., 1., 0.),
+        color: COLOR,
+        uv: Vec2::new(0., 0.),
+    },
+    MeshVertex {
+        position: Vec3::new(-1., -1., 0.),
+        color: COLOR,
+        uv: Vec2::new(0., 1.),
+    },
+];
+
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::NoUninit)]
 struct DisplayInfo {
     aspect: f32,
-    tag_x: f32,
-    tag_y: f32,
-    tag_x2: f32,
-    tag_y2: f32,
 }
 
-struct TagInfo {
-    tag_x: f32,
-    tag_y: f32,
-    tag_x2: f32,
-    tag_y2: f32,
+struct BasicBindGroup {
+    camera_sampler: GPUSampler,
+    camera_texture: GPUTexture,
+    display_info_buffer: GPUUniformBuffer<DisplayInfo>,
+}
+
+impl GPUResourceGroup for BasicBindGroup {
+    fn get_binding_types() -> Vec<wgpu::BindingType> {
+        vec![
+            GPUSampler::get_binding_type(),
+            GPUTexture::get_binding_type(),
+            GPUUniformBuffer::<DisplayInfo>::get_binding_type(),
+        ]
+    }
+
+    fn get_binding_resources(&self) -> Vec<wgpu::BindingResource<'_>> {
+        vec![
+            self.camera_sampler.get_binding_resource(),
+            self.camera_texture.get_binding_resource(),
+            self.display_info_buffer.get_binding_resource(),
+        ]
+    }
 }
 
 struct VisionState {
     width: u32,
     height: u32,
     buffer: Vec<u8>,
-    tag: Option<TagInfo>,
 }
 
 struct AppState {
     window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    surface_format: wgpu::TextureFormat,
-    adapter: wgpu::Adapter,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    size: winit::dpi::PhysicalSize<u32>,
+    renderer: Renderer,
     camera_data: Arc<Mutex<Option<VisionState>>>,
-    camera_sampler: wgpu::Sampler,
-    camera_texture: wgpu::Texture,
-    render_pipeline: wgpu::RenderPipeline,
-    bind_group: wgpu::BindGroup,
-    display_info_buffer: wgpu::Buffer,
-    display_info: DisplayInfo,
+    shader_resources: BasicBindGroup,
+    bind_group: GPUBindGroup<BasicBindGroup>,
+    vertex_buffer: VertexBuffer<MeshVertex>,
+    shader_program: GPURenderProgram<MeshVertex, BasicBindGroup>,
 }
 
 fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
@@ -56,7 +111,6 @@ fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
     }
 
     let device = &cameras[0];
-    println!("Using camera: {}", device.name);
 
     let caps = cameras::probe(device).unwrap();
 
@@ -76,7 +130,6 @@ fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
     }
 
     let selected_format = &caps.formats[format_index];
-    println!("Requesting camera format: {:?}", selected_format);
 
     let camera = cameras::open(
         device,
@@ -88,7 +141,7 @@ fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
     )
     .unwrap();
 
-    println!("Using camera format: {:?}", camera.config);
+    println!("Using camera config: {:?}", camera.config);
 
     let mut image = unsafe { apriltag::Image::new_uinit(1920, 1080) }.unwrap();
     let mut detector = apriltag::Detector::builder()
@@ -107,23 +160,11 @@ fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
         }
 
         let detections = detector.detect(&image);
-        let mut tag = None;
-        if detections.len() > 0 {
-            let p1 = detections[0].corners()[0];
-            let p2 = detections[0].corners()[2];
-            tag = Some(TagInfo {
-                tag_x: p1[0] as f32 / frame.width as f32,
-                tag_y: p1[1] as f32 / frame.height as f32,
-                tag_x2: p2[0] as f32 / frame.width as f32,
-                tag_y2: p2[1] as f32 / frame.height as f32,
-            })
-        }
 
         *camera_data.lock().unwrap() = Some(VisionState {
             width: frame.width,
             height: frame.height,
             buffer: buffer_bytes,
-            tag,
         });
     }
 }
@@ -136,175 +177,52 @@ impl AppState {
                 .unwrap(),
         );
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
-            Box::new(event_loop.owned_display_handle()),
-        ));
+        let renderer = Renderer::new(event_loop, window.clone()).await;
 
-        let surface = instance.create_surface(window.clone()).unwrap();
+        let shader_module = &renderer.create_wgsl_shader(include_str!("shader.wgsl"));
 
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptionsBase {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
+        let camera_sampler = GPUSampler::new(&renderer.device);
 
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-            .unwrap();
+        let camera_texture = GPUTexture::new(&renderer.device, renderer.queue.clone(), 1920, 1080);
 
-        let surface_format = surface.get_capabilities(&adapter).formats[0];
+        let display_info_buffer = GPUUniformBuffer::new(
+            renderer.device.clone(),
+            renderer.queue.clone(),
+            &DisplayInfo { aspect: 1. },
+        );
 
-        println!("GPU device: {}", device.adapter_info().name);
-        println!("GPU backend: {}", device.adapter_info().backend);
+        let shader_resources = BasicBindGroup {
+            camera_sampler,
+            camera_texture,
+            display_info_buffer,
+        };
 
-        let shader_module = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+        let bind_group = GPUBindGroup::new(renderer.device.clone(), &shader_resources);
 
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: None,
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::all(),
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::all(),
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::all(),
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(size_of::<DisplayInfo>() as u64),
-                    },
-                    count: None,
-                },
-            ],
-        });
+        let shader_program = GPURenderProgram::new(
+            &renderer.device,
+            shader_module,
+            "vs_main",
+            "fs_main",
+            renderer.surface_format,
+            bind_group.clone(),
+        );
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
-
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader_module,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_module,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::all(),
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let size = window.inner_size();
+        let vertex_buffer =
+            VertexBuffer::new(renderer.device.clone(), renderer.queue.clone(), VERTICES);
 
         let camera_data = Arc::new(Mutex::new(None));
 
-        let camera_sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
-
-        let camera_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: wgpu::Extent3d {
-                width: 1920,
-                height: 1080,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb],
-        });
-
-        let texture_view = camera_texture.create_view(&wgpu::wgt::TextureViewDescriptor::default());
-
-        let display_info_buffer = device.create_buffer(&wgpu::wgt::BufferDescriptor {
-            label: None,
-            size: size_of::<DisplayInfo>() as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
-            mapped_at_creation: false,
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Sampler(&camera_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &display_info_buffer,
-                        offset: 0,
-                        size: wgpu::BufferSize::new(size_of::<DisplayInfo>() as u64),
-                    }),
-                },
-            ],
-        });
-
         let state = Self {
             window,
-            surface,
-            surface_format,
-            adapter,
-            device,
-            queue,
-            size,
+            renderer,
             camera_data: camera_data.clone(),
-            camera_texture,
-            camera_sampler,
-            render_pipeline,
+            shader_resources,
             bind_group,
-            display_info_buffer,
-            display_info: DisplayInfo {
-                aspect: 0.,
-                tag_x: 0.,
-                tag_y: 0.,
-                tag_x2: 0.,
-                tag_y2: 0.,
-            },
+            vertex_buffer,
+            shader_program,
         };
 
-        state.configure_surface();
         state.window.request_redraw();
 
         thread::spawn(move || run_camera_thread(camera_data));
@@ -312,48 +230,12 @@ impl AppState {
         return state;
     }
 
-    fn configure_surface(&self) {
-        self.surface.configure(
-            &self.device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: self.surface_format,
-                color_space: wgpu::SurfaceColorSpace::Auto,
-                width: self.size.width,
-                height: self.size.height,
-                present_mode: wgpu::PresentMode::Immediate,
-                desired_maximum_frame_latency: 1,
-                alpha_mode: wgpu::CompositeAlphaMode::Auto,
-                view_formats: vec![self.surface_format],
-            },
-        );
-    }
-
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        self.size = new_size;
-        self.configure_surface();
+        self.renderer.resize(new_size);
     }
 
-    fn update_camera_texture_data(&self, state: &VisionState, texture: &wgpu::Texture) {
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d { x: 0, y: 0, z: 0 },
-                aspect: wgpu::TextureAspect::All,
-            },
-            &state.buffer,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(state.width * 4 as u32),
-                rows_per_image: Some(state.height),
-            },
-            texture.size(),
-        );
-    }
-
-    fn set_camera_texture(&mut self, state: &VisionState) {
-        self.update_camera_texture_data(state, &self.camera_texture);
+    fn update_camera_texture_data(&self, state: &VisionState) {
+        self.shader_resources.camera_texture.set_data(&state.buffer);
     }
 
     fn render(&mut self) {
@@ -362,77 +244,27 @@ impl AppState {
         let camera_data = self.camera_data.lock().unwrap().take();
 
         if let Some(state) = &camera_data {
-            self.set_camera_texture(state);
-            if let Some(tag) = &state.tag {
-                self.display_info.tag_x = tag.tag_x;
-                self.display_info.tag_y = tag.tag_y;
-                self.display_info.tag_x2 = tag.tag_x2;
-                self.display_info.tag_y2 = tag.tag_y2;
-            }
+            self.update_camera_texture_data(state);
         }
-
-        let current_texture = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(surface_texture) => surface_texture,
-            wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
-                self.configure_surface();
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Timeout => return,
-            wgpu::CurrentSurfaceTexture::Occluded => return,
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                self.configure_surface();
-                return;
-            }
-            _ => panic!(),
-        };
 
         let camera_aspect = 1920. / 1080.;
 
-        let window_aspect =
-            current_texture.texture.width() as f32 / current_texture.texture.height() as f32;
+        let window_aspect = self.renderer.size().width as f32 / self.renderer.size().height as f32;
 
         let aspect = window_aspect / camera_aspect;
 
-        self.display_info.aspect = aspect;
+        self.shader_resources
+            .display_info_buffer
+            .write(&DisplayInfo { aspect });
 
-        self.queue.write_buffer(
-            &self.display_info_buffer,
-            0,
-            bytemuck::bytes_of(&self.display_info),
-        );
-
-        let texture_view = current_texture
-            .texture
-            .create_view(&wgpu::wgt::TextureViewDescriptor::default());
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: None,
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &texture_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, Some(&self.bind_group), &[]);
-            render_pass.draw(0..6, 0..1);
+        let frame = self.renderer.begin_frame();
+        if let Some(mut f) = frame {
+            {
+                let mut ctx = f.begin_pass();
+                ctx.draw(&self.shader_program, &self.vertex_buffer, &self.bind_group);
+            }
+            self.renderer.end_frame(f);
         }
-
-        self.window.pre_present_notify();
-        self.queue.submit(Some(encoder.finish()));
-        self.queue.present(current_texture);
     }
 }
 
