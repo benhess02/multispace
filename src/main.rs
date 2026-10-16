@@ -1,7 +1,6 @@
 mod math;
 mod mesh;
 mod renderer;
-mod vertexBuffer;
 
 use std::{
     sync::{Arc, Mutex},
@@ -16,10 +15,9 @@ use winit::{
 use crate::{
     math::{Vec2, Vec3},
     mesh::MeshVertex,
-    renderer::Renderer,
-    vertexBuffer::{
+    renderer::{
         GPUBindGroup, GPURenderProgram, GPUResource, GPUResourceGroup, GPUSampler, GPUTexture,
-        GPUUniformBuffer, VertexBuffer,
+        GPUUniformBuffer, Renderer, VertexBuffer,
     },
 };
 

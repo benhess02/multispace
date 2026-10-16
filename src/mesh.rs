@@ -1,6 +1,6 @@
 use crate::{
     math::{Vec2, Vec3},
-    vertexBuffer::GPUVertexData,
+    renderer::GPUVertexData,
 };
 
 #[repr(C)]
