@@ -14,47 +14,12 @@ use winit::{
 
 use crate::{
     math::{Vec2, Vec3},
-    mesh::MeshVertex,
+    mesh::{MeshBuilder, MeshVertex},
     renderer::{
         GPUBindGroup, GPURenderProgram, GPUResource, GPUResourceGroup, GPUSampler, GPUTexture,
         GPUUniformBuffer, Renderer, VertexBuffer,
     },
 };
-
-const COLOR: Vec3 = Vec3::new(1., 0.2, 0.2);
-
-const VERTICES: &[MeshVertex] = &[
-    MeshVertex {
-        position: Vec3::new(-1., -1., 0.),
-        color: COLOR,
-        uv: Vec2::new(0., 1.),
-    },
-    MeshVertex {
-        position: Vec3::new(1., -1., 0.),
-        color: COLOR,
-        uv: Vec2::new(1., 1.),
-    },
-    MeshVertex {
-        position: Vec3::new(1., 1., 0.),
-        color: COLOR,
-        uv: Vec2::new(1., 0.),
-    },
-    MeshVertex {
-        position: Vec3::new(1., 1., 0.),
-        color: COLOR,
-        uv: Vec2::new(1., 0.),
-    },
-    MeshVertex {
-        position: Vec3::new(-1., 1., 0.),
-        color: COLOR,
-        uv: Vec2::new(0., 0.),
-    },
-    MeshVertex {
-        position: Vec3::new(-1., -1., 0.),
-        color: COLOR,
-        uv: Vec2::new(0., 1.),
-    },
-];
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::NoUninit)]
@@ -90,6 +55,7 @@ struct VisionState {
     width: u32,
     height: u32,
     buffer: Vec<u8>,
+    detections: Vec<[Vec2; 4]>,
 }
 
 struct AppState {
@@ -157,12 +123,23 @@ fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
             image_index += 1;
         }
 
-        let detections = detector.detect(&image);
+        let raw_detections = detector.detect(&image);
+        let mut detections = Vec::with_capacity(raw_detections.len());
+
+        for detection in raw_detections {
+            detections.push(detection.corners().map(|c| {
+                Vec2::new(
+                    c[0] as f32 / (frame.width as f32 / 2.) - 1.,
+                    1. - c[1] as f32 / (frame.height as f32 / 2.),
+                )
+            }));
+        }
 
         *camera_data.lock().unwrap() = Some(VisionState {
             width: frame.width,
             height: frame.height,
             buffer: buffer_bytes,
+            detections,
         });
     }
 }
@@ -206,8 +183,7 @@ impl AppState {
             bind_group.clone(),
         );
 
-        let vertex_buffer =
-            VertexBuffer::new(renderer.device.clone(), renderer.queue.clone(), VERTICES);
+        let vertex_buffer = VertexBuffer::new(renderer.device.clone(), renderer.queue.clone(), &[]);
 
         let camera_data = Arc::new(Mutex::new(None));
 
@@ -239,11 +215,32 @@ impl AppState {
     fn render(&mut self) {
         self.window.request_redraw();
 
-        let camera_data = self.camera_data.lock().unwrap().take();
+        let mut mesh_builder = MeshBuilder::new();
 
-        if let Some(state) = &camera_data {
+        mesh_builder.add_quad(
+            Vec3::new(-1., 1., 1.),
+            Vec3::new(1., 1., 1.),
+            Vec3::new(-1., -1., 1.),
+            Vec3::new(1., -1., 1.),
+        );
+
+        let camera_data = self.camera_data.lock().unwrap();
+
+        mesh_builder.set_color(Vec3::new(0., 1., 0.));
+
+        if let Some(state) = &camera_data.as_ref() {
             self.update_camera_texture_data(state);
+            for detection in &state.detections {
+                mesh_builder.add_quad(
+                    detection[2].into(),
+                    detection[3].into(),
+                    detection[1].into(),
+                    detection[0].into(),
+                );
+            }
         }
+
+        self.vertex_buffer.set_vertices(mesh_builder.mesh());
 
         let camera_aspect = 1920. / 1080.;
 

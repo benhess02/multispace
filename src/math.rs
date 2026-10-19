@@ -332,3 +332,9 @@ impl Div<Vec3> for f32 {
         }
     }
 }
+
+impl From<Vec2> for Vec3 {
+    fn from(value: Vec2) -> Self {
+        Vec3::new(value.x, value.y, 0.)
+    }
+}
