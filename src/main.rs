@@ -2,6 +2,7 @@ mod math;
 mod mesh;
 mod renderer;
 
+use core::f32;
 use std::{
     sync::{Arc, Mutex},
     thread,
@@ -13,7 +14,7 @@ use winit::{
 };
 
 use crate::{
-    math::{Vec2, Vec3},
+    math::{Mat4, Vec2, Vec3},
     mesh::{MeshBuilder, MeshVertex},
     renderer::{
         GPUBindGroup, GPURenderProgram, GPUResource, GPUResourceGroup, GPUSampler, GPUTexture,
