@@ -14,47 +14,12 @@ use winit::{
 };
 
 use crate::{
-    math::{Mat4, Vec2, Vec3},
+    math::{Vec2, Vec3},
     mesh::{MeshBuilder, MeshVertex},
-    renderer::{
-        GPUBindGroup, GPURenderProgram, GPUResource, GPUResourceGroup, GPUSampler, GPUTexture,
-        GPUUniformBuffer, Renderer, VertexBuffer,
-    },
+    renderer::{GPUTexture, GPUVertexData, Renderer, VertexBuffer},
 };
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::NoUninit)]
-struct DisplayInfo {
-    aspect: f32,
-}
-
-struct BasicBindGroup {
-    camera_sampler: GPUSampler,
-    camera_texture: GPUTexture,
-    display_info_buffer: GPUUniformBuffer<DisplayInfo>,
-}
-
-impl GPUResourceGroup for BasicBindGroup {
-    fn get_binding_types() -> Vec<wgpu::BindingType> {
-        vec![
-            GPUSampler::get_binding_type(),
-            GPUTexture::get_binding_type(),
-            GPUUniformBuffer::<DisplayInfo>::get_binding_type(),
-        ]
-    }
-
-    fn get_binding_resources(&self) -> Vec<wgpu::BindingResource<'_>> {
-        vec![
-            self.camera_sampler.get_binding_resource(),
-            self.camera_texture.get_binding_resource(),
-            self.display_info_buffer.get_binding_resource(),
-        ]
-    }
-}
-
 struct VisionState {
-    width: u32,
-    height: u32,
     buffer: Vec<u8>,
     detections: Vec<[Vec2; 4]>,
 }
@@ -63,10 +28,9 @@ struct AppState {
     window: Arc<Window>,
     renderer: Renderer,
     camera_data: Arc<Mutex<Option<VisionState>>>,
-    shader_resources: BasicBindGroup,
-    bind_group: GPUBindGroup<BasicBindGroup>,
-    vertex_buffer: VertexBuffer<MeshVertex>,
-    shader_program: GPURenderProgram<MeshVertex, BasicBindGroup>,
+    camera_texture: GPUTexture,
+    vertex_buffer: VertexBuffer,
+    shader_program: wgpu::RenderPipeline,
 }
 
 fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
@@ -137,8 +101,6 @@ fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
         }
 
         *camera_data.lock().unwrap() = Some(VisionState {
-            width: frame.width,
-            height: frame.height,
             buffer: buffer_bytes,
             detections,
         });
@@ -155,36 +117,16 @@ impl AppState {
 
         let renderer = Renderer::new(event_loop, window.clone()).await;
 
-        let shader_module = &renderer.create_wgsl_shader(include_str!("shader.wgsl"));
+        let camera_texture = renderer.create_texture(1920, 1080);
 
-        let camera_sampler = GPUSampler::new(&renderer.device);
-
-        let camera_texture = GPUTexture::new(&renderer.device, renderer.queue.clone(), 1920, 1080);
-
-        let display_info_buffer = GPUUniformBuffer::new(
-            renderer.device.clone(),
-            renderer.queue.clone(),
-            &DisplayInfo { aspect: 1. },
-        );
-
-        let shader_resources = BasicBindGroup {
-            camera_sampler,
-            camera_texture,
-            display_info_buffer,
-        };
-
-        let bind_group = GPUBindGroup::new(renderer.device.clone(), &shader_resources);
-
-        let shader_program = GPURenderProgram::new(
-            &renderer.device,
-            shader_module,
+        let shader_program = renderer.create_wgsl_render_pipeline(
+            include_str!("shader.wgsl"),
+            MeshVertex::get_layout(),
             "vs_main",
             "fs_main",
-            renderer.surface_format,
-            bind_group.clone(),
         );
 
-        let vertex_buffer = VertexBuffer::new(renderer.device.clone(), renderer.queue.clone(), &[]);
+        let vertex_buffer = renderer.create_vertex_buffer::<MeshVertex>(&[]);
 
         let camera_data = Arc::new(Mutex::new(None));
 
@@ -192,8 +134,7 @@ impl AppState {
             window,
             renderer,
             camera_data: camera_data.clone(),
-            shader_resources,
-            bind_group,
+            camera_texture,
             vertex_buffer,
             shader_program,
         };
@@ -210,7 +151,7 @@ impl AppState {
     }
 
     fn update_camera_texture_data(&self, state: &VisionState) {
-        self.shader_resources.camera_texture.set_data(&state.buffer);
+        self.camera_texture.set_data(&state.buffer);
     }
 
     fn render(&mut self) {
@@ -241,25 +182,15 @@ impl AppState {
             }
         }
 
-        self.vertex_buffer.set_vertices(mesh_builder.mesh());
+        self.vertex_buffer.set_vertices(mesh_builder.vertices());
 
-        let camera_aspect = 1920. / 1080.;
-
-        let window_aspect = self.renderer.size().width as f32 / self.renderer.size().height as f32;
-
-        let aspect = window_aspect / camera_aspect;
-
-        self.shader_resources
-            .display_info_buffer
-            .write(&DisplayInfo { aspect });
-
-        let frame = self.renderer.begin_frame();
-        if let Some(mut f) = frame {
+        if let Some(mut frame) = self.renderer.begin_frame() {
             {
-                let mut ctx = f.begin_pass();
-                ctx.draw(&self.shader_program, &self.vertex_buffer, &self.bind_group);
+                let mut ctx = frame.begin_pass();
+                ctx.set_texture(&self.camera_texture);
+                ctx.draw(&self.shader_program, &self.vertex_buffer);
             }
-            self.renderer.end_frame(f);
+            frame.end_frame();
         }
     }
 }

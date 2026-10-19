@@ -86,7 +86,7 @@ impl MeshBuilder {
         self.add_vertex_with_uv(top_left, Vec2::new(0., 0.));
     }
 
-    pub fn mesh(&self) -> &[MeshVertex] {
+    pub fn vertices(&self) -> &[MeshVertex] {
         &self.vertices
     }
 }

@@ -2,9 +2,10 @@ struct DisplayInfo {
     aspect: f32,
 }
 
-@group(0) @binding(0) var tex_sampler: sampler;
-@group(0) @binding(1) var tex: texture_2d<f32>;
-@group(0) @binding(2) var<uniform> info: DisplayInfo;
+@group(0) @binding(0) var<uniform> info: DisplayInfo;
+
+@group(1) @binding(0) var tex: texture_2d<f32>;
+@group(1) @binding(1) var tex_sampler: sampler;
 
 struct Vertex {
     @location(0) position: vec3<f32>,
@@ -29,7 +30,5 @@ fn vs_main(vert: Vertex) -> VertexOutput {
 
 @fragment
 fn fs_main(vert_out: VertexOutput) -> @location(0) vec4<f32> {
-    let gamma = vec4(2.2, 2.2, 2.2, 2.2);
-    let inv_gamma = 1.0 / gamma;
-    return pow(pow(textureSample(tex, tex_sampler, vert_out.uv), inv_gamma) * pow(vert_out.color, inv_gamma), gamma);
+    return textureSample(tex, tex_sampler, vert_out.uv) * vert_out.color;
 }
