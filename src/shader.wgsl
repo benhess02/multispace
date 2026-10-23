@@ -1,8 +1,4 @@
-struct DisplayInfo {
-    aspect: f32,
-}
-
-@group(0) @binding(0) var<uniform> info: DisplayInfo;
+@group(0) @binding(0) var<uniform> window_size: vec2<f32>;
 
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var tex_sampler: sampler;
@@ -22,7 +18,8 @@ struct VertexOutput {
 @vertex
 fn vs_main(vert: Vertex) -> VertexOutput {
     var output: VertexOutput;
-    output.position = vec4<f32>(vert.position, 1.0);
+    let aspect = window_size.y / window_size.x;
+    output.position = vec4<f32>(vert.position.x * aspect, vert.position.y, vert.position.z, 1.0);
     output.color = vec4<f32>(vert.color, 1.0);
     output.uv = vert.uv;
     return output;

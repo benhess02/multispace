@@ -14,9 +14,7 @@ use winit::{
 };
 
 use crate::{
-    math::{Vec2, Vec3},
-    mesh::{MeshBuilder, MeshVertex},
-    renderer::{GPUTexture, GPUVertexData, Renderer, VertexBuffer},
+    math::{Vec2, Vec3}, renderer::{Renderer, Texture},
 };
 
 struct VisionState {
@@ -28,17 +26,11 @@ struct AppState {
     window: Arc<Window>,
     renderer: Renderer,
     camera_data: Arc<Mutex<Option<VisionState>>>,
-    camera_texture: GPUTexture,
-    vertex_buffer: VertexBuffer,
-    shader_program: wgpu::RenderPipeline,
+    camera_texture: Texture,
 }
 
 fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
     let cameras = cameras::devices().unwrap();
-    for camera in &cameras {
-        println!("{:?}: {}", camera.id, camera.name);
-    }
-
     let device = &cameras[0];
 
     let caps = cameras::probe(device).unwrap();
@@ -79,7 +71,7 @@ fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
         .unwrap();
 
     loop {
-        let frame = cameras::next_frame(&camera, Duration::from_secs(1)).unwrap();
+        let frame = cameras::next_frame(&camera, Duration::from_secs(60)).unwrap();
         let buffer_bytes = cameras::to_rgba8(&frame).unwrap();
         let mut image_index: usize = 0;
         for pixel in buffer_bytes.chunks(4) {
@@ -94,7 +86,7 @@ fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
         for detection in raw_detections {
             detections.push(detection.corners().map(|c| {
                 Vec2::new(
-                    c[0] as f32 / (frame.width as f32 / 2.) - 1.,
+                    (c[0] as f32 - frame.width as f32 / 2.) / (frame.height as f32 / 2.),
                     1. - c[1] as f32 / (frame.height as f32 / 2.),
                 )
             }));
@@ -119,15 +111,6 @@ impl AppState {
 
         let camera_texture = renderer.create_texture(1920, 1080);
 
-        let shader_program = renderer.create_wgsl_render_pipeline(
-            include_str!("shader.wgsl"),
-            MeshVertex::get_layout(),
-            "vs_main",
-            "fs_main",
-        );
-
-        let vertex_buffer = renderer.create_vertex_buffer::<MeshVertex>(&[]);
-
         let camera_data = Arc::new(Mutex::new(None));
 
         let state = Self {
@@ -135,8 +118,6 @@ impl AppState {
             renderer,
             camera_data: camera_data.clone(),
             camera_texture,
-            vertex_buffer,
-            shader_program,
         };
 
         state.window.request_redraw();
@@ -157,46 +138,38 @@ impl AppState {
     fn render(&mut self) {
         self.window.request_redraw();
 
-        let mut mesh_builder = MeshBuilder::new();
-
-        mesh_builder.add_quad(
-            Vec3::new(-1., 1., 1.),
-            Vec3::new(1., 1., 1.),
-            Vec3::new(-1., -1., 1.),
-            Vec3::new(1., -1., 1.),
-        );
-
         let camera_data = self.camera_data.lock().unwrap();
-
-        mesh_builder.set_color(Vec3::new(0., 1., 0.));
 
         if let Some(state) = &camera_data.as_ref() {
             self.update_camera_texture_data(state);
+        }
+
+        self.renderer.reset_transform();
+        self.renderer.set_color(Vec3::new(1., 1., 1.));
+        self.renderer.set_texture(self.camera_texture.clone());
+        let camera_aspect = self.camera_texture.width() as f32 / self.camera_texture.height() as f32;
+        self.renderer.rectangle(Vec3::new(-camera_aspect, -1., 0.), Vec2::new(camera_aspect * 2., 2.));
+        self.renderer.reset_texture();
+
+        self.renderer.set_color(Vec3::new(1., 0., 0.));
+        if let Some(state) = &camera_data.as_ref() {
             for detection in &state.detections {
-                mesh_builder.add_quad(
+                self.renderer.quad(
+                    detection[0].into(),
+                    detection[1].into(),
                     detection[2].into(),
                     detection[3].into(),
-                    detection[1].into(),
-                    detection[0].into(),
                 );
             }
         }
 
-        self.vertex_buffer.set_vertices(mesh_builder.vertices());
-
-        if let Some(mut frame) = self.renderer.begin_frame() {
-            {
-                let mut ctx = frame.begin_pass();
-                ctx.set_texture(&self.camera_texture);
-                ctx.draw(&self.shader_program, &self.vertex_buffer);
-            }
-            frame.end_frame();
-        }
+        self.renderer.finish_frame();
     }
 }
 
 struct App {
     state: Option<AppState>,
+    is_occluded: bool
 }
 
 impl ApplicationHandler for App {
@@ -216,7 +189,15 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                state.render();
+                if !self.is_occluded {
+                    state.render();
+                }
+            }
+            WindowEvent::Occluded(occluded) => {
+                self.is_occluded = occluded;
+                if !occluded {
+                    state.window.request_redraw();
+                }
             }
             WindowEvent::Resized(new_size) => {
                 state.resize(new_size);
@@ -229,6 +210,6 @@ impl ApplicationHandler for App {
 fn main() {
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
-    let mut app = App { state: None };
+    let mut app = App { state: None, is_occluded: false };
     event_loop.run_app(&mut app).unwrap();
 }
