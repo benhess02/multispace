@@ -378,7 +378,7 @@ impl Renderer {
         });
     }
 
-    pub fn quad(
+    pub fn fill_quad(
         &mut self,
         bottom_left: Vec3,
         bottom_right: Vec3,
@@ -395,12 +395,36 @@ impl Renderer {
     }
 
     pub fn rectangle(&mut self, position: Vec3, size: Vec2) {
-        self.quad(
+        self.fill_quad(
             position, 
             position + Vec3::new(size.x, 0., 0.),
             position + Vec3::new(size.x, size.y, 0.),
             position + Vec3::new(0., size.y, 0.)
         );
+    }
+
+    pub fn draw_line(&mut self, start: Vec2, end: Vec2) {
+        let r = end - start;
+        let perp = Vec2::new(-r.y, r.x).normalize() * 0.01;
+        self.fill_quad(
+            (start + perp).into(), 
+            (start - perp).into(),
+            (end - perp).into(), 
+            (end + perp).into(),
+        );
+    }
+
+    pub fn draw_quad(
+        &mut self,
+        bottom_left: Vec2,
+        bottom_right: Vec2,
+        top_right: Vec2,
+        top_left: Vec2
+    ) {
+        self.draw_line(bottom_left, bottom_right);
+        self.draw_line(bottom_right, top_right);
+        self.draw_line(top_right, top_left);
+        self.draw_line(top_left, bottom_left);
     }
 
     pub fn finish_frame(&mut self) -> bool {

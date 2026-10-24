@@ -9,17 +9,23 @@ use std::{
     time::Duration,
 };
 
+use apriltag::TagParams;
 use winit::{
     application::ApplicationHandler, event::WindowEvent, event_loop::EventLoop, window::Window,
 };
 
 use crate::{
-    math::{Vec2, Vec3}, renderer::{Renderer, Texture},
+    math::{Mat4, Vec2, Vec3}, renderer::{Renderer, Texture},
 };
+
+struct Detection {
+    matrix: Mat4,
+    corners: [Vec2; 4],
+}
 
 struct VisionState {
     buffer: Vec<u8>,
-    detections: Vec<[Vec2; 4]>,
+    detections: Vec<Detection>,
 }
 
 struct AppState {
@@ -84,12 +90,24 @@ fn run_camera_thread(camera_data: Arc<Mutex<Option<VisionState>>>) {
         let mut detections = Vec::with_capacity(raw_detections.len());
 
         for detection in raw_detections {
-            detections.push(detection.corners().map(|c| {
-                Vec2::new(
+            let pose = detection.estimate_tag_pose(&TagParams {
+                tagsize: 0.02,
+                fx: 960.,
+                fy: 960.,
+                cx: frame.width as f64 / 2.,
+                cy: frame.height as f64 / 2.,
+            });
+            if let Some(p) = pose {
+                println!("{:?}", p.translation());
+            }
+
+            detections.push(Detection {
+                matrix: Mat4::identity(),
+                corners: detection.corners().map(|c| Vec2::new(
                     (c[0] as f32 - frame.width as f32 / 2.) / (frame.height as f32 / 2.),
                     1. - c[1] as f32 / (frame.height as f32 / 2.),
-                )
-            }));
+                ))
+            });
         }
 
         *camera_data.lock().unwrap() = Some(VisionState {
@@ -151,15 +169,10 @@ impl AppState {
         self.renderer.rectangle(Vec3::new(-camera_aspect, -1., 0.), Vec2::new(camera_aspect * 2., 2.));
         self.renderer.reset_texture();
 
-        self.renderer.set_color(Vec3::new(1., 0., 0.));
         if let Some(state) = &camera_data.as_ref() {
             for detection in &state.detections {
-                self.renderer.quad(
-                    detection[0].into(),
-                    detection[1].into(),
-                    detection[2].into(),
-                    detection[3].into(),
-                );
+                self.renderer.set_color(Vec3::new(1., 0., 0.));
+                self.renderer.rectangle(detection.corners[0].into(), Vec2::new(0.5, 0.5));
             }
         }
 
